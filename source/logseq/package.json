@@ -1,0 +1,11 @@
+{
+  "name": "habitude-logseq-export",
+  "version": "0.1.0",
+  "description": "Export the selected Markdown page locally for Habitude. 한국어·English.",
+  "author": "Habitude",
+  "main": "index.html",
+  "license": "AGPL-3.0-only",
+  "homepage": "https://habitude.ai",
+  "repository": { "type": "git", "url": "https://github.com/legott-ai/habitude-logseq-plugin.git" },
+  "logseq": { "id": "habitude-logseq-export", "title": "Habitude — Page export" }
+}
