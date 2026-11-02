@@ -29,7 +29,6 @@ jobs:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
       EXPECTED_SHA256: ${{ inputs.expected_sha256 || '' }}
       ASSET_NAME: habitude-logseq-0.1.0.zip
-      HABITUDE_PLUGIN_BUILD_DIR: ${{ runner.temp }}/habitude-logseq-sdk
     steps:
       - name: Validate tag and optional reviewed archive hash
         id: validate
@@ -52,6 +51,8 @@ jobs:
           package-manager-cache: false
       - name: Test, rebuild and verify the installable ZIP
         shell: bash
+        env:
+          HABITUDE_PLUGIN_BUILD_DIR: ${{ runner.temp }}/habitude-logseq-sdk
         run: |
           set -euo pipefail
           node -e 'if (process.env.RELEASE_TAG !== "v" + require("./package.json").version) process.exit(1)'
