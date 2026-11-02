@@ -1,0 +1,106 @@
+name: Test, build and publish Logseq release ZIP
+'on':
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing published release tag, for example v0.1.0
+        required: true
+        type: string
+      expected_sha256:
+        description: Optional reviewed ZIP SHA-256; fail if the rebuilt ZIP differs
+        required: false
+        default: ''
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: logseq-release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'legott-ai/habitude-logseq-plugin'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      EXPECTED_SHA256: ${{ inputs.expected_sha256 || '' }}
+      ASSET_NAME: habitude-logseq-0.1.0.zip
+      HABITUDE_PLUGIN_BUILD_DIR: ${{ runner.temp }}/habitude-logseq-sdk
+    steps:
+      - name: Validate tag and optional reviewed archive hash
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          [[ -z "$EXPECTED_SHA256" || "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]] || exit 1
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Check out the validated release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.validate.outputs.tag }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Set up Node LTS
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Test, rebuild and verify the installable ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e 'if (process.env.RELEASE_TAG !== "v" + require("./package.json").version) process.exit(1)'
+          node --version
+          python3 --version
+          npm test
+          npm run build
+          npm run verify
+          test -f "source/dist/$ASSET_NAME"
+          ACTUAL_SHA256="$(sha256sum "source/dist/$ASSET_NAME" | cut -d ' ' -f 1)"
+          [[ -z "$EXPECTED_SHA256" || "$ACTUAL_SHA256" == "$EXPECTED_SHA256" ]] || exit 1
+          printf 'Rebuilt ZIP SHA-256: `%s`\n' "$ACTUAL_SHA256" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify existing asset or attach the successful build without overwriting
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          [[ -z "$EXPECTED_SHA256" || "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]] || exit 1
+          ARCHIVE="source/dist/$ASSET_NAME"
+          ACTUAL_SHA256="$(sha256sum "$ARCHIVE" | cut -d ' ' -f 1)"
+          [[ -z "$EXPECTED_SHA256" || "$ACTUAL_SHA256" == "$EXPECTED_SHA256" ]] || exit 1
+          export RELEASE_QA_DIR
+          RELEASE_QA_DIR="$(mktemp -d "$RUNNER_TEMP/logseq-release.XXXXXX")"
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > "$RELEASE_QA_DIR/release.json"
+          RELEASE_ID="$(node <<'NODE'
+          const fs = require('node:fs');
+          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_QA_DIR + '/release.json'));
+          if (release.tag_name !== process.env.RELEASE_TAG || release.draft !== false || !Number.isSafeInteger(release.id) || release.id <= 0) process.exit(1);
+          process.stdout.write(String(release.id));
+          NODE
+          )"
+          gh api --paginate --slurp "repos/$GH_REPO/releases/$RELEASE_ID/assets?per_page=100" > "$RELEASE_QA_DIR/assets.json"
+          ASSET_COUNT="$(node <<'NODE'
+          const fs = require('node:fs');
+          const pages = JSON.parse(fs.readFileSync(process.env.RELEASE_QA_DIR + '/assets.json'));
+          if (!Array.isArray(pages) || !pages.every(Array.isArray)) process.exit(1);
+          const count = pages.flat().filter(asset => asset.name === process.env.ASSET_NAME).length;
+          if (count > 1) process.exit(1);
+          process.stdout.write(String(count));
+          NODE
+          )"
+          if [[ "$ASSET_COUNT" == '0' ]]; then
+            # No --clobber: a concurrent existing upload must fail rather than be replaced.
+            gh release upload "$RELEASE_TAG" "$ARCHIVE" --repo "$GH_REPO"
+          fi
+          mkdir "$RELEASE_QA_DIR/downloaded"
+          gh release download "$RELEASE_TAG" --repo "$GH_REPO" --pattern "$ASSET_NAME" --dir "$RELEASE_QA_DIR/downloaded"
+          cmp --silent "$ARCHIVE" "$RELEASE_QA_DIR/downloaded/$ASSET_NAME"
+          printf 'Release `%s`: verified `%s`, SHA-256 `%s`; existing assets were preserved.\n' "$RELEASE_TAG" "$ASSET_NAME" "$ACTUAL_SHA256" >> "$GITHUB_STEP_SUMMARY"
